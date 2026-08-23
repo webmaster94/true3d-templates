@@ -1,16 +1,20 @@
 import {
+  dispositionMatches,
   formatSignedElevation,
   modifierMatches,
   nextElevation,
+  pointWithinSphere,
   resolveModifier,
   resolveWallPreview,
-  shiftElevationRange
+  shiftElevationRange,
+  tokenSamplePoints
 } from "./core.js";
 
 const MODULE_ID = "true3d-templates";
 const BADGE_ID = `${MODULE_ID}-badge`;
 const OVERLAY_PROPERTY = "_true3dBlockedOverlay";
 const WALL_PREVIEW_INTERVAL = 100;
+const LIVE_TARGET_INTERVAL = 100;
 
 const state = {
   badge: null,
@@ -21,7 +25,13 @@ const state = {
   wallPreviewKey: null,
   wallPreviewTime: 0,
   blocked: false,
-  wallErrorShown: false
+  wallErrorShown: false,
+  liveTargetTime: 0,
+  liveTargetKey: null,
+  livePlacementDocument: null,
+  livePreviousTargetIds: null,
+  livePlacementCommitted: false,
+  liveTargetCount: null
 };
 
 Hooks.once("init", () => {
@@ -36,6 +46,8 @@ Hooks.once("init", () => {
     if (controlled) state.focusedRegion = region;
     else if (state.focusedRegion === region) state.focusedRegion = null;
   });
+  Hooks.on("createRegion", markLivePlacementCommitted);
+  Hooks.on("midi-qol.postTemplatePlaced", correctMidiSphereTargets);
 });
 
 Hooks.once("ready", () => {
@@ -50,6 +62,7 @@ Hooks.on("canvasReady", () => {
 
 Hooks.on("canvasTearDown", () => {
   removeWheelListener();
+  finishLiveSphereTargeting();
   hideBadge();
   state.focusedRegion = null;
   state.lastPlacement = null;
@@ -126,6 +139,24 @@ function registerSettings() {
     type: Boolean,
     default: true
   });
+
+  game.settings.register(MODULE_ID, "sphereTargeting", {
+    name: "Use true 3D sphere targeting",
+    hint: "Select creatures using horizontal and vertical distance for D&D 5e sphere templates. Corrects Midi-QOL targets after placement.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true
+  });
+
+  game.settings.register(MODULE_ID, "liveSphereTargets", {
+    name: "Show live sphere targets",
+    hint: "Update target selection while moving a 3D sphere template so players can see who will be affected.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true
+  });
 }
 
 function prepareActivityTemplate(activity, templateData) {
@@ -136,6 +167,7 @@ function prepareActivityTemplate(activity, templateData) {
   templateData.flags ??= {};
   templateData.flags[MODULE_ID] = {
     originElevation,
+    centerElevation: originElevation,
     sourceTokenUuid: token?.document?.uuid ?? null,
     activityUuid: activity?.uuid ?? null
   };
@@ -241,10 +273,21 @@ function getDocumentElevation(document) {
 function setDocumentElevation(document, next) {
   if (document.documentName === "Region") {
     const elevation = shiftElevationRange(document.elevation, next);
-    document.updateSource({elevation});
+    document.updateSource({
+      elevation,
+      [`flags.${MODULE_ID}.centerElevation`]: next
+    });
     return;
   }
-  document.updateSource({elevation: next});
+  document.updateSource({
+    elevation: next,
+    [`flags.${MODULE_ID}.centerElevation`]: next
+  });
+}
+
+function getCenterElevation(document) {
+  return Number(foundry.utils.getProperty(document, `flags.${MODULE_ID}.centerElevation`)
+    ?? getDocumentElevation(document));
 }
 
 function getOriginElevation(document) {
@@ -281,8 +324,10 @@ function startDisplayLoop() {
     if (placement) {
       state.lastPlacement = placement;
       scheduleWallPreview(placement);
+      scheduleLiveSphereTargets(placement);
     } else {
       clearWallPreview(state.lastPlacement);
+      finishLiveSphereTargeting();
       state.lastPlacement = null;
       state.wallPreviewKey = null;
       state.blocked = false;
@@ -306,9 +351,13 @@ function updateBadge(display) {
   );
 
   badge.querySelector(".true3d-template-badge__value").textContent = formatSignedElevation(elevation, unit);
-  const detail = display.kind === "placement"
+  let detail = display.kind === "placement"
     ? `${formatSignedElevation(delta, unit)} from source · ${modifierLabel(modifier)} + wheel`
     : "Template elevation";
+  if (display.kind === "placement" && state.liveTargetCount !== null) {
+    const label = state.liveTargetCount === 1 ? "target" : "targets";
+    detail += ` · ${state.liveTargetCount} ${label}`;
+  }
   badge.querySelector(".true3d-template-badge__detail").textContent = state.blocked && display.kind === "placement"
     ? `${detail} · red is wall-blocked`
     : detail;
@@ -342,6 +391,248 @@ function positionBadge(badge, preview) {
 function modifierLabel(modifier) {
   if (modifier === "control") return "Ctrl";
   return modifier.charAt(0).toUpperCase() + modifier.slice(1);
+}
+
+function sphereTargetingEnabled() {
+  return Boolean(game.settings.get(MODULE_ID, "sphereTargeting"));
+}
+
+function getSphereDefinition(document) {
+  if (!document || !sphereTargetingEnabled()) return null;
+  const activityUuid = foundry.utils.getProperty(document, `flags.${MODULE_ID}.activityUuid`)
+    ?? foundry.utils.getProperty(document, "flags.dnd5e.origin");
+  const activity = activityUuid ? fromUuidSync(activityUuid) : null;
+  const template = activity?.target?.template;
+  if (template?.type !== "sphere") return null;
+
+  const gridSize = Number(canvas.grid?.size ?? 0);
+  const gridDistance = Number(canvas.grid?.distance ?? canvas.scene?.grid?.distance ?? 0);
+  if (gridSize <= 0 || gridDistance <= 0) return null;
+  const pixelsPerUnit = gridSize / gridDistance;
+  const centerElevation = getCenterElevation(document);
+
+  if (document.documentName === "Region") {
+    const shape = document.shapes?.find?.(candidate => candidate.type === "circle")
+      ?? document.shapes?.at?.(0);
+    if (!shape || shape.type !== "circle") return null;
+    return {
+      activity,
+      center: {x: Number(shape.x), y: Number(shape.y), elevation: centerElevation},
+      radius: Number(shape.radius) / pixelsPerUnit,
+      pixelsPerUnit
+    };
+  }
+
+  const radius = Number(template.size ?? document.distance);
+  if (!Number.isFinite(radius) || radius < 0) return null;
+  return {
+    activity,
+    center: {x: Number(document.x), y: Number(document.y), elevation: centerElevation},
+    radius,
+    pixelsPerUnit
+  };
+}
+
+function getMidiConfig() {
+  if (!game.modules.get("midi-qol")?.active) return null;
+  try {
+    return game.settings.get("midi-qol", "ConfigSettings");
+  } catch {
+    return null;
+  }
+}
+
+function getAutoTargetMode(activity, midiConfig) {
+  const activityMode = foundry.utils.getProperty(activity, "midiProperties.autoTargetAction");
+  return activityMode && activityMode !== "default" ? activityMode : midiConfig?.autoTarget;
+}
+
+function getAoeTargetType(activity) {
+  const override = foundry.utils.getProperty(activity, "midiProperties.autoTargetType");
+  if (override && override !== "any") return override;
+  const affects = activity?.target?.affects?.type;
+  if (affects === "ally" || affects === "enemy") return affects;
+  return "any";
+}
+
+function isDefeatedToken(token, midiConfig) {
+  const defeated = CONFIG.specialStatusEffects?.DEFEATED;
+  const midiDead = midiConfig?.midiDeadCondition;
+  return Boolean(
+    (defeated && token.actor?.statuses?.has(defeated))
+    || (midiDead && token.actor?.statuses?.has(midiDead))
+    || token.actor?.statuses?.has("dead")
+  );
+}
+
+function isTargetableToken(token, {activity, sourceToken, autoTarget, midiConfig}) {
+  if (!token?.actor || token.actor.type === "group" || token.document.hidden || token.document.isSecret) return false;
+  if (token.actor.getFlag?.("midi-qol", "neverTarget")) return false;
+
+  if (["wallsBlockIgnoreDefeated", "alwaysIgnoreDefeated"].includes(autoTarget)
+      && isDefeatedToken(token, midiConfig)) return false;
+  if (["wallsBlockIgnoreIncapacitated", "alwaysIgnoreIncapacitated"].includes(autoTarget)
+      && globalThis.MidiQOL?.checkIncapacitated?.(token.actor, false, false)) return false;
+
+  const special = String(activity?.target?.affects?.special ?? "").split(";");
+  if (special.includes("-self") && sourceToken?.document?.uuid === token.document.uuid) return false;
+
+  const targetType = getAoeTargetType(activity);
+  return dispositionMatches(
+    token.document.disposition,
+    sourceToken?.document?.disposition ?? CONST.TOKEN_DISPOSITIONS.FRIENDLY,
+    targetType,
+    CONST.TOKEN_DISPOSITIONS.SECRET
+  );
+}
+
+function pointBlockedByWall(center, point, midiConfig, autoTarget) {
+  const wallsBlock = [
+    "wallsBlock",
+    "wallsBlockIgnoreDefeated",
+    "wallsBlockIgnoreIncapacitated"
+  ].includes(autoTarget);
+  if (!wallsBlock) return false;
+
+  if (midiConfig?.optionalRules?.wallsBlockRange === "centerLevels"
+      && game.modules.get("levels")?.active
+      && !game.modules.get("levelsvolumetrictemplates")?.active
+      && CONFIG.Levels?.API?.testCollision) {
+    return Boolean(CONFIG.Levels.API.testCollision(
+      {x: point.x, y: point.y, z: point.elevation},
+      {x: center.x, y: center.y, z: center.elevation},
+      "collision"
+    ));
+  }
+
+  return Boolean(CONFIG.Canvas.polygonBackends.sight.testCollision(
+    {x: center.x, y: center.y, elevation: center.elevation},
+    {x: point.x, y: point.y, elevation: point.elevation},
+    {mode: "any", type: "move", level: canvas.level}
+  ));
+}
+
+function computeSphereTargets(document, workflow = null) {
+  const sphere = getSphereDefinition(document);
+  if (!sphere) return null;
+
+  const midiConfig = getMidiConfig();
+  const autoTarget = getAutoTargetMode(sphere.activity, midiConfig) ?? "always";
+  if (midiConfig && autoTarget === "none") return null;
+
+  const sourceToken = workflow?.token?.object
+    ?? workflow?.token
+    ?? findSourceToken(sphere.activity, document);
+  const gridSize = Number(canvas.grid.size);
+  const targets = [];
+
+  for (const token of canvas.tokens.placeables) {
+    if (!isTargetableToken(token, {
+      activity: sphere.activity,
+      sourceToken,
+      autoTarget,
+      midiConfig
+    })) continue;
+
+    const points = tokenSamplePoints({
+      x: token.x,
+      y: token.y,
+      width: token.document.width,
+      height: token.document.height,
+      elevation: token.document.elevation
+    }, gridSize);
+    const contained = points.some(point =>
+      pointWithinSphere(sphere.center, point, sphere.radius, sphere.pixelsPerUnit)
+      && !pointBlockedByWall(sphere.center, point, midiConfig, autoTarget)
+    );
+    if (contained) targets.push(token);
+  }
+  const limit = Number(sphere.activity?.target?.affects?.count);
+  return Number.isFinite(limit) && limit > 0 ? targets.slice(0, limit) : targets;
+}
+
+function sphereTargetKey(document) {
+  const sphere = getSphereDefinition(document);
+  if (!sphere) return null;
+  const positions = canvas.tokens.placeables.map(token => [
+    token.id,
+    token.x,
+    token.y,
+    token.document.elevation,
+    token.document.width,
+    token.document.height
+  ].join(",")).join(";");
+  return [sphere.center.x, sphere.center.y, sphere.center.elevation, sphere.radius, positions].join(":");
+}
+
+function scheduleLiveSphereTargets(placement) {
+  if (!game.settings.get(MODULE_ID, "liveSphereTargets")) {
+    finishLiveSphereTargeting();
+    return;
+  }
+
+  const key = sphereTargetKey(placement.document);
+  if (!key) {
+    finishLiveSphereTargeting();
+    return;
+  }
+
+  if (state.livePlacementDocument !== placement.document) {
+    finishLiveSphereTargeting();
+    state.livePlacementDocument = placement.document;
+    state.livePreviousTargetIds = Array.from(game.user.targets ?? []).map(token => token.id);
+    state.livePlacementCommitted = false;
+  }
+
+  const now = performance.now();
+  if (key === state.liveTargetKey || now - state.liveTargetTime < LIVE_TARGET_INTERVAL) return;
+  state.liveTargetKey = key;
+  state.liveTargetTime = now;
+
+  const targets = computeSphereTargets(placement.document);
+  if (!targets) return;
+  const ids = targets.map(token => token.id);
+  canvas.tokens.setTargets(ids);
+  state.liveTargetCount = ids.length;
+}
+
+function markLivePlacementCommitted(region, _options, userId) {
+  if (userId !== game.user.id) return;
+  if (!foundry.utils.getProperty(region, `flags.${MODULE_ID}.activityUuid`)) return;
+  state.livePlacementCommitted = true;
+}
+
+function finishLiveSphereTargeting() {
+  if (!state.livePlacementDocument) return;
+  if (!state.livePlacementCommitted && state.livePreviousTargetIds) {
+    canvas.tokens?.setTargets(state.livePreviousTargetIds);
+  }
+  state.liveTargetTime = 0;
+  state.liveTargetKey = null;
+  state.livePlacementDocument = null;
+  state.livePreviousTargetIds = null;
+  state.livePlacementCommitted = false;
+  state.liveTargetCount = null;
+}
+
+async function correctMidiSphereTargets(workflow) {
+  if (!sphereTargetingEnabled() || !workflow?.templateUuids?.length) return true;
+
+  const documents = workflow.templateUuids.map(uuid => fromUuidSync(uuid));
+  if (documents.some(document => !getSphereDefinition(document))) return true;
+
+  const targetSet = new Set();
+  for (const document of documents) {
+    const targets = computeSphereTargets(document, workflow);
+    if (!targets) return true;
+    targets.forEach(token => targetSet.add(token));
+  }
+
+  const ids = Array.from(targetSet, token => token.id).filter(Boolean);
+  canvas.tokens.setTargets(ids);
+  workflow.setTargets(targetSet);
+  if (workflow.activity?.setupCanSeeSense) await workflow.activity.setupCanSeeSense({workflow});
+  return true;
 }
 
 function wallPreviewEnabled() {
@@ -472,6 +763,8 @@ globalThis.True3DTemplates = {
     );
   },
   getActivePlacement,
+  computeSphereTargets,
+  getSphereDefinition,
   refreshWallPreview() {
     state.wallPreviewKey = null;
   }

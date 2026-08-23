@@ -8,12 +8,16 @@ The default modifier is Alt. A GM can change the world default, and each player 
 
 When wall preview is enabled, Foundry's sight-wall collision check runs at the selected elevation. Blocked parts of the template are painted red before placement. This is a preview aid. A spell's own rules still decide whether a wall blocks its effect.
 
+For sphere templates such as Fireball, live targeting uses the actual 3D distance from the template center to each creature: horizontal distance and elevation difference are combined instead of treating the circle as an infinite vertical column. The badge shows the current target count while the template moves. When Midi-QOL is active, True 3D Templates replaces the final targets through Midi's workflow hook for these spherical Regions only. Other templates and Midi targeting behavior are left unchanged.
+
+True 3D sphere targeting is enabled for the world by default. Each player can turn the live target preview on or off for their client. Midi-QOL's auto-target mode, defeated/incapacitated exclusions, disposition filters, target limits, and wall-blocking choice are respected.
+
 ## Compatibility
 
-- Foundry Virtual Tabletop 14.360
+- Foundry Virtual Tabletop 14.360 and later v14 builds
 - D&D 5e 5.3.3
 - Region-backed templates introduced in Foundry 14
-- Compatible with Midi-QOL's template elevation handling
+- Compatible with Midi-QOL auto-targeting; spherical Region targets are corrected without patching Midi-QOL
 
 ## Install
 
