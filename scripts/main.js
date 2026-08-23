@@ -35,7 +35,8 @@ const state = {
   livePlacementCommitted: false,
   liveTargetCount: null,
   liveTargetIds: null,
-  liveTargetReconcileQueued: false
+  liveTargetReconcileQueued: false,
+  pendingTargetSnapshot: null
 };
 
 Hooks.once("init", () => {
@@ -55,6 +56,7 @@ Hooks.once("init", () => {
 });
 
 Hooks.once("ready", () => {
+  Hooks.on("refreshMeasuredTemplate", reconcileRefreshedMeasuredTemplate);
   createBadge();
   startDisplayLoop();
 });
@@ -177,6 +179,12 @@ function prepareActivityTemplate(activity, templateData) {
     sourceTokenUuid: token?.document?.uuid ?? null,
     activityUuid: activity?.uuid ?? null
   };
+  if (activity?.target?.template?.type === "sphere") {
+    state.pendingTargetSnapshot = {
+      activityUuid: activity?.uuid ?? null,
+      targetIds: Array.from(game.user.targets ?? [], target => target.id)
+    };
+  }
 }
 
 function findSourceToken(activity, templateData) {
@@ -571,7 +579,7 @@ function sphereTargetKey(document) {
   return [sphere.center.x, sphere.center.y, sphere.center.elevation, sphere.radius, positions].join(":");
 }
 
-function scheduleLiveSphereTargets(placement) {
+function scheduleLiveSphereTargets(placement, {force=false}={}) {
   if (!game.settings.get(MODULE_ID, "liveSphereTargets")) {
     finishLiveSphereTargeting();
     return;
@@ -585,10 +593,16 @@ function scheduleLiveSphereTargets(placement) {
 
   if (state.livePlacementDocument !== placement.document) {
     finishLiveSphereTargeting();
+    const activityUuid = foundry.utils.getProperty(placement.document, `flags.${MODULE_ID}.activityUuid`);
+    const pendingSnapshot = state.pendingTargetSnapshot?.activityUuid === activityUuid
+      ? state.pendingTargetSnapshot.targetIds
+      : null;
     state.livePlacementDocument = placement.document;
-    state.livePreviousTargetIds = Array.from(game.user.targets ?? []).map(token => token.id);
+    state.livePreviousTargetIds = pendingSnapshot
+      ?? Array.from(game.user.targets ?? [], target => target.id);
     state.livePlacementCommitted = false;
     state.liveTargetIds = null;
+    state.pendingTargetSnapshot = null;
   }
 
   const now = performance.now();
@@ -596,7 +610,7 @@ function scheduleLiveSphereTargets(placement) {
     reconcileLiveSphereTargets();
     return;
   }
-  if (now - state.liveTargetTime < LIVE_TARGET_INTERVAL) return;
+  if (!force && now - state.liveTargetTime < LIVE_TARGET_INTERVAL) return;
   state.liveTargetKey = key;
   state.liveTargetTime = now;
 
@@ -606,6 +620,12 @@ function scheduleLiveSphereTargets(placement) {
   state.liveTargetIds = ids;
   state.liveTargetCount = ids.length;
   reconcileLiveSphereTargets();
+}
+
+function reconcileRefreshedMeasuredTemplate() {
+  const placement = getActivePlacement();
+  if (!placement) return;
+  scheduleLiveSphereTargets(placement, {force: true});
 }
 
 function scheduleLiveSphereTargetReconciliation(user) {
