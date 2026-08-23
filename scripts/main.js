@@ -6,6 +6,7 @@ import {
   pointWithinSphere,
   resolveModifier,
   resolveWallPreview,
+  shapeRasterCells,
   shiftElevationRange,
   targetIdsEqual,
   tokenSamplePoints
@@ -729,25 +730,27 @@ function drawWallPreview(placement) {
 
   overlay.beginFill(0xff334d, 0.3);
   try {
-    for (let y = bounds.top; y < bounds.bottom; y += cell) {
-      for (let x = bounds.left; x < bounds.right; x += cell) {
-        const center = {x: x + (cell / 2), y: y + (cell / 2)};
-        if (!placementContainsPoint(placement, center)) continue;
-        const collides = backend.testCollision(
-          {...origin, elevation},
-          {...center, elevation},
-          {
-            type: "sight",
-            mode: "any",
-            level: canvas.level,
-            edgeTypes: {wall: true, outerBounds: true},
-            useThreshold: true
-          }
-        );
-        if (!collides) continue;
-        blocked += 1;
-        overlay.drawRect(x - localOffsetX, y - localOffsetY, cell + 1, cell + 1);
-      }
+    const cells = shapeRasterCells(bounds, cell, point => placementContainsPoint(placement, point));
+    for (const rasterCell of cells) {
+      const collides = rasterCell.samples.some(point => backend.testCollision(
+        {...origin, elevation},
+        {...point, elevation},
+        {
+          type: "sight",
+          mode: "any",
+          level: canvas.level,
+          edgeTypes: {wall: true, outerBounds: true},
+          useThreshold: true
+        }
+      ));
+      if (!collides) continue;
+      blocked += 1;
+      overlay.drawRect(
+        rasterCell.x - localOffsetX,
+        rasterCell.y - localOffsetY,
+        rasterCell.size + 1,
+        rasterCell.size + 1
+      );
     }
   } catch (error) {
     overlay.clear();

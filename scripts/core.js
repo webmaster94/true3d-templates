@@ -121,3 +121,25 @@ export function targetIdsEqual(currentTargets, desiredIds) {
   if (currentIds.size !== desired.size) return false;
   return Array.from(desired).every(id => currentIds.has(id));
 }
+
+export function shapeRasterCells(bounds, cellSize, containsPoint) {
+  const cells = [];
+  const size = Number(cellSize);
+  if (!bounds || !Number.isFinite(size) || size <= 0 || typeof containsPoint !== "function") return cells;
+  const sampleFractions = [0.25, 0.5, 0.75];
+
+  for (let y = bounds.top; y < bounds.bottom; y += size) {
+    for (let x = bounds.left; x < bounds.right; x += size) {
+      const samples = [];
+      for (const yFraction of sampleFractions) {
+        for (const xFraction of sampleFractions) {
+          const point = {x: x + (size * xFraction), y: y + (size * yFraction)};
+          if (containsPoint(point)) samples.push(point);
+        }
+      }
+      if (!samples.length) continue;
+      cells.push({x, y, size, samples});
+    }
+  }
+  return cells;
+}

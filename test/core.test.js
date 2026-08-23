@@ -10,6 +10,7 @@ import {
   pointWithinSphere,
   resolveModifier,
   resolveWallPreview,
+  shapeRasterCells,
   shiftElevationRange,
   targetIdsEqual,
   tokenSamplePoints,
@@ -95,4 +96,18 @@ test("live target reconciliation detects when another module replaces the 3D tar
   assert.equal(targetIdsEqual(midiTargets, sphereTargets), false);
   assert.equal(targetIdsEqual([{id: "high"}, {id: "low"}], sphereTargets), true);
   assert.equal(targetIdsEqual([], []), true);
+});
+
+test("wall preview raster covers template edges when a cell center falls outside", () => {
+  const center = {x: 100, y: 100};
+  const radius = 100;
+  const containsPoint = point => Math.hypot(point.x - center.x, point.y - center.y) <= radius;
+  const cells = shapeRasterCells({left: 0, top: 0, right: 200, bottom: 200}, 50, containsPoint);
+  const edgePoint = {x: 30, y: 40};
+
+  assert.equal(containsPoint(edgePoint), true);
+  assert.equal(cells.some(cell => (
+    edgePoint.x >= cell.x && edgePoint.x < cell.x + cell.size
+    && edgePoint.y >= cell.y && edgePoint.y < cell.y + cell.size
+  )), true);
 });
