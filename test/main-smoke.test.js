@@ -16,7 +16,7 @@ test("Foundry entry point registers its lifecycle hooks", async () => {
   await import(`../scripts/main.js?smoke=${Date.now()}`);
 
   assert.deepEqual(once, ["init", "ready"]);
-  assert.deepEqual(on, ["canvasReady", "canvasTearDown"]);
+  assert.deepEqual(on, ["canvasReady", "targetToken", "canvasTearDown"]);
   assert.equal(typeof globalThis.True3DTemplates.getActivePlacement, "function");
   assert.equal(typeof globalThis.True3DTemplates.computeSphereTargets, "function");
   assert.equal(typeof globalThis.True3DTemplates.getSphereDefinition, "function");

@@ -114,3 +114,10 @@ export function dispositionMatches(targetDisposition, sourceDisposition, targetT
       return true;
   }
 }
+
+export function targetIdsEqual(currentTargets, desiredIds) {
+  const currentIds = new Set(Array.from(currentTargets ?? [], target => target?.id ?? target));
+  const desired = new Set(desiredIds ?? []);
+  if (currentIds.size !== desired.size) return false;
+  return Array.from(desired).every(id => currentIds.has(id));
+}

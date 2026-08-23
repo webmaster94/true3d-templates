@@ -7,6 +7,7 @@ import {
   resolveModifier,
   resolveWallPreview,
   shiftElevationRange,
+  targetIdsEqual,
   tokenSamplePoints
 } from "./core.js";
 
@@ -31,7 +32,9 @@ const state = {
   livePlacementDocument: null,
   livePreviousTargetIds: null,
   livePlacementCommitted: false,
-  liveTargetCount: null
+  liveTargetCount: null,
+  liveTargetIds: null,
+  liveTargetReconcileQueued: false
 };
 
 Hooks.once("init", () => {
@@ -59,6 +62,8 @@ Hooks.on("canvasReady", () => {
   installWheelListener();
   state.wallPreviewKey = null;
 });
+
+Hooks.on("targetToken", scheduleLiveSphereTargetReconciliation);
 
 Hooks.on("canvasTearDown", () => {
   removeWheelListener();
@@ -582,18 +587,41 @@ function scheduleLiveSphereTargets(placement) {
     state.livePlacementDocument = placement.document;
     state.livePreviousTargetIds = Array.from(game.user.targets ?? []).map(token => token.id);
     state.livePlacementCommitted = false;
+    state.liveTargetIds = null;
   }
 
   const now = performance.now();
-  if (key === state.liveTargetKey || now - state.liveTargetTime < LIVE_TARGET_INTERVAL) return;
+  if (key === state.liveTargetKey) {
+    reconcileLiveSphereTargets();
+    return;
+  }
+  if (now - state.liveTargetTime < LIVE_TARGET_INTERVAL) return;
   state.liveTargetKey = key;
   state.liveTargetTime = now;
 
   const targets = computeSphereTargets(placement.document);
   if (!targets) return;
   const ids = targets.map(token => token.id);
-  canvas.tokens.setTargets(ids);
+  state.liveTargetIds = ids;
   state.liveTargetCount = ids.length;
+  reconcileLiveSphereTargets();
+}
+
+function scheduleLiveSphereTargetReconciliation(user) {
+  if (user !== game.user || !state.livePlacementDocument || state.liveTargetIds === null) return;
+  if (state.liveTargetReconcileQueued) return;
+  state.liveTargetReconcileQueued = true;
+  queueMicrotask(() => {
+    state.liveTargetReconcileQueued = false;
+    reconcileLiveSphereTargets();
+  });
+}
+
+function reconcileLiveSphereTargets() {
+  const ids = state.liveTargetIds;
+  if (!state.livePlacementDocument || ids === null || !canvas.tokens) return;
+  if (targetIdsEqual(game.user.targets, ids)) return;
+  canvas.tokens.setTargets(ids);
 }
 
 function markLivePlacementCommitted(region, _options, userId) {
@@ -613,6 +641,7 @@ function finishLiveSphereTargeting() {
   state.livePreviousTargetIds = null;
   state.livePlacementCommitted = false;
   state.liveTargetCount = null;
+  state.liveTargetIds = null;
 }
 
 async function correctMidiSphereTargets(workflow) {

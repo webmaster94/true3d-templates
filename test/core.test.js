@@ -11,6 +11,7 @@ import {
   resolveModifier,
   resolveWallPreview,
   shiftElevationRange,
+  targetIdsEqual,
   tokenSamplePoints,
   tokenWithinSphere
 } from "../scripts/core.js";
@@ -85,4 +86,13 @@ test("Midi-style disposition filters distinguish allies and absolute friendlines
   assert.equal(dispositionMatches(-1, -1, "friendly"), false);
   assert.equal(dispositionMatches(1, -1, "friendly"), true);
   assert.equal(dispositionMatches(-2, 1, "enemy"), true);
+});
+
+test("live target reconciliation detects when another module replaces the 3D targets", () => {
+  const midiTargets = [{id: "low"}, {id: "high"}, {id: "outside"}];
+  const sphereTargets = ["low", "high"];
+
+  assert.equal(targetIdsEqual(midiTargets, sphereTargets), false);
+  assert.equal(targetIdsEqual([{id: "high"}, {id: "low"}], sphereTargets), true);
+  assert.equal(targetIdsEqual([], []), true);
 });
