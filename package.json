@@ -1,0 +1,15 @@
+{
+  "name": "true3d-templates",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Elevation controls and wall-block previews for Foundry VTT AOE templates.",
+  "scripts": {
+    "check": "node --check scripts/core.js && node --check scripts/main.js && node --check tools/package-release.mjs",
+    "test": "node --test",
+    "package": "node tools/package-release.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
